@@ -8,6 +8,7 @@ import (
 	//"os/signal"
 	//"syscall"
 	"flag"
+	"path"
 	"path/filepath"
 	"sync"
 )
@@ -26,13 +27,13 @@ var (
 func Tail(path string, info os.FileInfo, err error) error {
 
 	// FIXME this wont skip hidden files on windows
-	// not sure if people even them
+	// not sure if people even use them
 	if watchAll == false && info.Name()[0:1] == "." {
 		return filepath.SkipDir
 	}
 
 	watcher.Watch(path)
-	addWatch( path)
+	addWatch(path, true)
 	fmt.Println(path)
 
 	return nil
@@ -50,7 +51,7 @@ func update(in io.Reader) {
 	}
 }
 
-func addWatch(path string) error {
+func addWatch(path string, seekEnd bool) error {
 
 	mu.Lock()
 	fd, err := os.Open(path)
@@ -60,6 +61,10 @@ func addWatch(path string) error {
 
 	watching[path] = fd
 	mu.Unlock()
+
+	if seekEnd {
+		fd.Seek(0, os.SEEK_END)
+	}
 
 	return nil
 }
@@ -75,7 +80,7 @@ func watch() {
 		} else if event.IsModify() {
 			go fileModified(event)
 		} else if event.IsDelete() {
-			out("DELETED", "%s", event.Name)
+			out("DELETED", event.Name)
 		} else if event.IsCreate() {
 			go fileCreated(event)
 		} else if event.IsRename() {
@@ -85,14 +90,14 @@ func watch() {
 
 var lastformat string
 
-func out(action, format string, args ...interface{}) {
-	format = format + " <== " + action + "\n"
+func out(action, file string) {
+	format := fmt.Sprintf("%s <== %s\n", file, action)
 	if format == lastformat {
 		return
 	}
 
 	lastformat = format
-	fmt.Printf(format, args)
+	fmt.Print(format)
 }
 
 func fileModified(event *fsnotify.FileEvent) {
@@ -102,7 +107,7 @@ func fileModified(event *fsnotify.FileEvent) {
 	mu.RUnlock()
 
 	if exists == false {
-		err := addWatch(event.Name)
+		err := addWatch(event.Name, false)
 		if err != nil {
 			fmt.Printf("couldnt open file: %s", event.Name)
 			return
@@ -110,7 +115,7 @@ func fileModified(event *fsnotify.FileEvent) {
 		fd = watching[event.Name]
 		fd.Seek(0, os.SEEK_END)
 	} else {
-		out("MODIFIED", "%s", event.Name)
+		out("MODIFIED", event.Name)
 		update(fd)
 	}
 }
@@ -122,15 +127,15 @@ func fileCreated(event *fsnotify.FileEvent) {
 	mu.RUnlock()
 
 	if exists == false {
-		err := addWatch(event.Name)
+		err := addWatch(event.Name, false)
 		if err != nil {
 			fmt.Printf("couldnt open file: %s", event.Name)
 			return
 		}
-		out("CREATE", "%s", event.Name)
+		out("CREATE", event.Name)
 	} else {
 		fd.Seek(0, 0)
-		out("TRUNCATE", "%s", event.Name)
+		out("TRUNCATE", event.Name)
 	}
 }
 
@@ -139,11 +144,26 @@ func main() {
 	flag.BoolVar(&recursive, "R", false, "tail failes in subfolders")
 	flag.BoolVar(&watchAll, "a", false, "watch hidden directories")
 	flag.Parse()
+	target := flag.Arg(0)
 
-	cwd, err := os.Getwd()
+	var err error
+
+	cwd, err = os.Getwd()
 	if err != nil {
 		fmt.Println("couldnt get cwd")
 		return
+	}
+
+	// if no args its cwd, otherwise the directory/file to tail
+	if target == "" {
+		target = cwd
+	} else {
+		_, staterr := os.Stat(path.Join(cwd, target))
+
+		if staterr != nil {
+			fmt.Println("couldnt stat " + target)
+			return
+		}
 	}
 
 	watcher, err = fsnotify.NewWatcher()
@@ -155,6 +175,6 @@ func main() {
 	watching = make(map[string]*os.File)
 	mu = &sync.RWMutex{}
 
-	go filepath.Walk(cwd, Tail)
+	go filepath.Walk(target, Tail)
 	watch()
 }
